@@ -3,9 +3,10 @@ package com.soubhagyajit.awa.processing
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.RectF
+import android.graphics.Rect
 import android.util.Log
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -625,22 +626,23 @@ class ChromaKeyProcessor {
 
     private fun planesFromBitmap(bitmap: Bitmap, width: Int, height: Int): Planes {
         // Centre-crop the picture to the frame aspect, so the background never looks squeezed.
+        // Integer rects: drawBitmap has no overload that takes two RectF arguments.
         val scaled = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val srcRatio = bitmap.width.toFloat() / bitmap.height
         val dstRatio = width.toFloat() / height
         val srcRect = if (srcRatio > dstRatio) {
             val w = bitmap.height * dstRatio
             val left = (bitmap.width - w) / 2f
-            RectF(left, 0f, left + w, bitmap.height.toFloat())
+            Rect(left.roundToInt(), 0, (left + w).roundToInt(), bitmap.height)
         } else {
             val h = bitmap.width / dstRatio
             val top = (bitmap.height - h) / 2f
-            RectF(0f, top, bitmap.width.toFloat(), top + h)
+            Rect(0, top.roundToInt(), bitmap.width, (top + h).roundToInt())
         }
         Canvas(scaled).drawBitmap(
             bitmap,
             srcRect,
-            RectF(0f, 0f, width.toFloat(), height.toFloat()),
+            Rect(0, 0, width, height),
             Paint(Paint.FILTER_BITMAP_FLAG),
         )
 
