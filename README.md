@@ -408,6 +408,26 @@ yarn tauri build
 
 Open the Android project in Android Studio, configure the Android SDK and required dependencies, and build the application using Gradle.
 
+The background removal needs the NDK (28.2, AGP 9.2's default) and CMake 3.22.1, both of which
+Gradle downloads on the first build - no Vulkan SDK and no shader compiler are required, because the
+SPIR-V blobs are committed under `app/src/main/assets/shaders`.
+
+### Continuous integration
+
+| Workflow | Runs on | Does |
+|:---|:---|:---|
+| `android.yml` | push to `master`, pull requests, tags | `assembleDebug` + unit tests, uploads `awa-debug-apk`; on a `v*` tag it also attaches the APK to the release |
+| `checks.yml` | changes to `AWA/tools`, the shaders or the native module | the CPU mirrors and the SPIR-V descriptor check, in seconds |
+
+The APK from a run is on the run page under **Artifacts**. It is debug-signed, so it installs without
+a keystore - which is why the release job ships the debug build rather than an unsigned release one.
+To cut a release:
+
+```bash
+git tag v1.0.5
+git push origin v1.0.5
+```
+
 ---
 
 ## Troubleshooting
