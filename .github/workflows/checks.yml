@@ -70,7 +70,11 @@ jobs:
   shaders:
     name: SPIR-V matches its source
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    # Informational only. The rebuild needs a 55 MB npm package and a glslang version that matches
+    # whatever produced the committed blobs, so a difference here is a hint, not a verdict -
+    # check_spirv.py in the job above is the hard gate on the committed SPIR-V.
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -80,13 +84,13 @@ jobs:
           node-version: '20'
 
       - name: Rebuild the shaders with glslang (WASM)
+        timeout-minutes: 8
+        continue-on-error: true
         working-directory: AWA
         run: |
           npm install --no-save --no-audit --no-fund @webgpu/glslang
           node tools/build_shaders.mjs
 
-      # Informational: a byte diff can come from a glslang version bump rather than from an edited
-      # .comp, so this reports instead of blocking. check_spirv.py above is the hard gate.
       - name: Diff against the committed blobs
         continue-on-error: true
         run: |
