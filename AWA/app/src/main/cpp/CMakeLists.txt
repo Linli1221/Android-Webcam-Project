@@ -13,5 +13,7 @@ target_compile_options(awa_chromakey PRIVATE -Wall -Wextra -Wno-unused-parameter
                                              -Wno-missing-field-initializers)
 
 find_library(log-lib log)
+# AAssetManager_fromJava / AAsset_open live in libandroid, not in liblog.
+find_library(android-lib android)
 
-target_link_libraries(awa_chromakey PRIVATE vulkan ${log-lib})
+target_link_libraries(awa_chromakey PRIVATE vulkan ${android-lib} ${log-lib})
