@@ -1,6 +1,8 @@
 package com.soubhagyajit.awa.viewModel
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Rect
 import android.graphics.SurfaceTexture
@@ -11,6 +13,7 @@ import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
 import android.media.CamcorderProfile
 import android.media.MediaRecorder
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -43,10 +46,14 @@ import androidx.lifecycle.viewModelScope
 import com.pedro.common.ConnectChecker
 import com.pedro.library.view.OpenGlView
 import com.pedro.rtspserver.RtspServerCamera2
+import com.soubhagyajit.awa.processing.BackgroundRemover
+import com.soubhagyajit.awa.processing.ChromaKeyProcessor
+import com.soubhagyajit.awa.processing.PlateSubtractor
 import com.soubhagyajit.awa.server.AwaDiscovery
 import com.soubhagyajit.awa.server.VideoStreamServer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -113,6 +120,32 @@ class CameraViewModel : ViewModel() {
         val zoom: Float = 1.0f,
         val zoomMin: Float = 1.0f,
         val zoomMax: Float = 1.0f,
+        // --- background removal (MJPEG mode, applied on the phone before JPEG encoding) ---
+        val chromaKeyEnabled: Boolean = false,
+        /** Which engine removes the background: a coloured screen, a person mask, or auto. */
+        val backgroundMode: BackgroundRemover.Mode = BackgroundRemover.Mode.AUTO,
+        val chromaKeyColor: Int = 0xFF00FF00.toInt(),
+        val chromaSimilarity: Float = 0.28f,
+        val chromaSmoothness: Float = 0.12f,
+        val chromaSpill: Float = 0.45f,
+        /** Foreground cut of the segmentation mask, 0..1. */
+        val personThreshold: Float = 0.5f,
+        /** Soft edge applied to the segmentation mask, 0..0.5. */
+        val personFeather: Float = 0.2f,
+        /** Temporal smoothing of the segmentation mask, 0..0.9. */
+        val personSmooth: Float = 0.35f,
+        // --- background plate: shot the empty scene, cut what differs (camera must stay put) ---
+        /** How much of the scene the plate removes, 0..1. */
+        val plateSensitivity: Float = 0.5f,
+        /** Soft edge width of the plate matte, 0..1.5. */
+        val plateFeather: Float = 0.35f,
+        /** Temporal smoothing of the plate matte, 0..0.9. */
+        val plateSmooth: Float = 0.4f,
+        val chromaBackgroundColor: Int = 0xFF101018.toInt(),
+        val chromaUseImageBackground: Boolean = false,
+        val chromaBackgroundLabel: String? = null,
+        /** Use the Vulkan compute keyer when the device supports it (falls back to the CPU). */
+        val chromaGpu: Boolean = true,
     )
 
     @Volatile
@@ -152,6 +185,200 @@ class CameraViewModel : ViewModel() {
 
     private val _settings = mutableStateOf(CameraSettings(stretchFix = defaultStretchFix()))
     val settings: State<CameraSettings> = _settings
+
+    /** Runs on the analyzer thread; owns its buffers, so no allocation per frame. */
+    private val background = BackgroundRemover()
+
+    /** Which backend is actually removing the background (Vulkan, CPU, ML Kit). */
+    private val _chromaBackend = mutableStateOf("CPU")
+    val chromaBackend: State<String> = _chromaBackend
+
+    /** NONE / CAPTURING / READY of the background plate, mirrored to the UI thread. */
+    private val _plateState = mutableStateOf(PlateSubtractor.State.NONE)
+    val plateState: State<PlateSubtractor.State> = _plateState
+
+    /** Written on the analyzer thread only, so the mirror above is posted just when it changes. */
+    @Volatile
+    private var plateStateShadow = PlateSubtractor.State.NONE
+
+    private fun refreshBackendLabel() {
+        _chromaBackend.value = background.backendLabel
+        plateStateShadow = background.plateState
+        _plateState.value = plateStateShadow
+    }
+
+    /** Mirrors the current settings into the processor (called from the main thread only). */
+    private fun syncChromaConfig() {
+        val s = _settings.value
+        background.mode = s.backgroundMode
+        background.config = ChromaKeyProcessor.Config(
+            enabled = s.chromaKeyEnabled,
+            keyColor = s.chromaKeyColor,
+            similarity = s.chromaSimilarity,
+            smoothness = s.chromaSmoothness,
+            spill = s.chromaSpill,
+            backgroundColor = s.chromaBackgroundColor,
+            useImageBackground = s.chromaUseImageBackground,
+            useGpu = s.chromaGpu,
+            maskThreshold = s.personThreshold,
+            maskFeather = s.personFeather,
+            maskSmoothing = s.personSmooth,
+            plateSensitivity = s.plateSensitivity,
+            plateFeather = s.plateFeather,
+            plateSmoothing = s.plateSmooth,
+        )
+        refreshBackendLabel()
+    }
+
+    fun setChromaKeyEnabled(enabled: Boolean) {
+        _settings.value = _settings.value.copy(chromaKeyEnabled = enabled)
+        syncChromaConfig()
+        // Show what the stream looks like straight away, so the sliders can be tuned on the phone.
+        if (enabled) notifyScreenTapped()
+    }
+
+    fun setBackgroundMode(mode: BackgroundRemover.Mode) {
+        _settings.value = _settings.value.copy(backgroundMode = mode)
+        syncChromaConfig()
+        if (_settings.value.chromaKeyEnabled) notifyScreenTapped()
+    }
+
+    fun setPersonThreshold(value: Float) {
+        _settings.value = _settings.value.copy(personThreshold = value.coerceIn(0.1f, 0.9f))
+        syncChromaConfig()
+    }
+
+    fun setPersonFeather(value: Float) {
+        _settings.value = _settings.value.copy(personFeather = value.coerceIn(0.01f, 0.5f))
+        syncChromaConfig()
+    }
+
+    fun setPersonSmooth(value: Float) {
+        _settings.value = _settings.value.copy(personSmooth = value.coerceIn(0f, 0.9f))
+        syncChromaConfig()
+    }
+
+    fun setPlateSensitivity(value: Float) {
+        _settings.value = _settings.value.copy(plateSensitivity = value.coerceIn(0.1f, 0.9f))
+        syncChromaConfig()
+    }
+
+    fun setPlateFeather(value: Float) {
+        _settings.value = _settings.value.copy(plateFeather = value.coerceIn(0f, 1.5f))
+        syncChromaConfig()
+    }
+
+    fun setPlateSmooth(value: Float) {
+        _settings.value = _settings.value.copy(plateSmooth = value.coerceIn(0f, 0.9f))
+        syncChromaConfig()
+    }
+
+    /**
+     * Shoots a new background plate: switches to the plate engine (so the shot is taken even if the
+     * user was in another mode) and asks the analyzer for the next frames. The user has to be out of
+     * the shot for those two or three frames - the panel says so.
+     */
+    fun capturePlate() {
+        // Capturing only makes sense if the engine is going to run, so both switches are turned on
+        // here: a plate without background removal would just never be used.
+        val current = _settings.value
+        if (!current.chromaKeyEnabled || current.backgroundMode != BackgroundRemover.Mode.PLATE) {
+            _settings.value = current.copy(
+                chromaKeyEnabled = true,
+                backgroundMode = BackgroundRemover.Mode.PLATE,
+            )
+            syncChromaConfig()
+        }
+        background.startPlateCapture()
+        // The analyzer keeps encoding while frames are needed, but the panel should still show the
+        // result of the shot without a second tap.
+        notifyScreenTapped()
+        refreshBackendLabel()
+    }
+
+    /** Drops the plate, e.g. after the phone was moved. */
+    fun clearPlate() {
+        background.clearPlate()
+        refreshBackendLabel()
+    }
+
+    fun setChromaKeyColor(color: Int) {
+        _settings.value = _settings.value.copy(chromaKeyColor = color)
+        syncChromaConfig()
+    }
+
+    fun setChromaSimilarity(value: Float) {
+        _settings.value = _settings.value.copy(chromaSimilarity = value.coerceIn(0.05f, 0.9f))
+        syncChromaConfig()
+    }
+
+    fun setChromaKeySmoothness(value: Float) {
+        _settings.value = _settings.value.copy(chromaSmoothness = value.coerceIn(0f, 0.5f))
+        syncChromaConfig()
+    }
+
+    fun setChromaSpill(value: Float) {
+        _settings.value = _settings.value.copy(chromaSpill = value.coerceIn(0f, 1f))
+        syncChromaConfig()
+    }
+
+    /**
+     * Switches between the Vulkan compute keyer and the CPU one. The GPU path silently falls back
+     * to the CPU anyway, so this is for comparing the two or working around a driver bug.
+     */
+    fun setChromaGpu(enabled: Boolean) {
+        _settings.value = _settings.value.copy(chromaGpu = enabled)
+        syncChromaConfig()
+    }
+
+    fun setChromaBackgroundColor(color: Int) {
+        _settings.value = _settings.value.copy(
+            chromaBackgroundColor = color,
+            chromaUseImageBackground = false,
+            chromaBackgroundLabel = null,
+        )
+        background.clearBackgroundImage()
+        syncChromaConfig()
+    }
+
+    /**
+     * Loads a still picture and uses it as the replacement background. The content URI grant from
+     * the picker only lives as long as the process, so the picture is kept in memory, not on disk.
+     */
+    fun setChromaBackgroundImage(uri: Uri) {
+        val ctx = appContext ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val bitmap = decodeBackground(ctx, uri)
+                if (bitmap == null) {
+                    Log.e("AWA", "Could not decode background image $uri")
+                    return@launch
+                }
+                background.setBackgroundImage(bitmap)
+                withContext(Dispatchers.Main) {
+                    _settings.value = _settings.value.copy(
+                        chromaUseImageBackground = true,
+                        chromaBackgroundLabel = "Custom image",
+                    )
+                    syncChromaConfig()
+                }
+            } catch (e: Exception) {
+                Log.e("AWA", "Failed to load background image", e)
+            }
+        }
+    }
+
+    private fun decodeBackground(ctx: Context, uri: Uri): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        // The planes are built per frame size anyway, so a 4K photo would only waste memory.
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1920) sample *= 2
+        val options = BitmapFactory.Options().apply { inSampleSize = sample }
+        return ctx.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+    }
 
     private val viewerCount = AtomicInteger(0)
     private val jpegViewerCount = AtomicInteger(0)
@@ -257,6 +484,10 @@ class CameraViewModel : ViewModel() {
 
     fun initialize(context: Context) {
         appContext = context.applicationContext
+        // Creates the Vulkan device up front, so the first keyed frame is not the one that pays
+        // for it (and so the settings panel can show which backend is in use).
+        background.attachAssets(appContext?.assets)
+        refreshBackendLabel()
         refreshResolutions()
 
         // 1. Viewer Connection Callbacks
@@ -315,6 +546,24 @@ class CameraViewModel : ViewModel() {
                 focus_distance = s.focusDistance*1000,
                 stream_quality = s.jpegQuality,
                 has_flash_unit = s.hasFlashUnit,
+                chroma_key = s.chromaKeyEnabled,
+                background_mode = s.backgroundMode.id,
+                background_engine = _chromaBackend.value,
+                chroma_key_color = toHexColor(s.chromaKeyColor),
+                chroma_key_similarity = s.chromaSimilarity,
+                chroma_key_smoothness = s.chromaSmoothness,
+                chroma_key_spill = s.chromaSpill,
+                segmentation_threshold = s.personThreshold,
+                segmentation_feather = s.personFeather,
+                segmentation_smoothing = s.personSmooth,
+                plate_sensitivity = s.plateSensitivity,
+                plate_feather = s.plateFeather,
+                plate_smoothing = s.plateSmooth,
+                plate_ready = _plateState.value == PlateSubtractor.State.READY,
+                chroma_key_background = if (s.chromaUseImageBackground) "image" else "solid",
+                chroma_key_background_color = toHexColor(s.chromaBackgroundColor),
+                chroma_key_gpu = _chromaBackend.value.startsWith("Vulkan"),
+                chroma_key_backend = _chromaBackend.value,
             )
         }
 
@@ -377,6 +626,35 @@ class CameraViewModel : ViewModel() {
                     update.stream_quality?.let{value ->
                         _settings.value = _settings.value.copy(jpegQuality = value)
                     }
+
+                    // --- background removal, settable from the desktop client ---
+                    update.chroma_key?.let { enable ->
+                        _settings.value = _settings.value.copy(chromaKeyEnabled = enable)
+                        syncChromaConfig()
+                    }
+                    update.background_mode?.let { id ->
+                        BackgroundRemover.Mode.fromId(id)?.let { setBackgroundMode(it) }
+                    }
+                    update.chroma_key_color?.let { hex ->
+                        parseHexColor(hex)?.let { color ->
+                            _settings.value = _settings.value.copy(chromaKeyColor = color)
+                            syncChromaConfig()
+                        }
+                    }
+                    update.chroma_key_similarity?.let { setChromaSimilarity(it) }
+                    update.chroma_key_smoothness?.let { setChromaKeySmoothness(it) }
+                    update.chroma_key_spill?.let { setChromaSpill(it) }
+                    update.segmentation_threshold?.let { setPersonThreshold(it) }
+                    update.segmentation_feather?.let { setPersonFeather(it) }
+                    update.segmentation_smoothing?.let { setPersonSmooth(it) }
+                    update.plate_sensitivity?.let { setPlateSensitivity(it) }
+                    update.plate_feather?.let { setPlateFeather(it) }
+                    update.plate_smoothing?.let { setPlateSmooth(it) }
+                    update.plate_capture?.let { if (it) capturePlate() }
+                    update.chroma_key_background_color?.let { hex ->
+                        parseHexColor(hex)?.let { setChromaBackgroundColor(it) }
+                    }
+                    update.chroma_key_gpu?.let { setChromaGpu(it) }
                 }
                 null
             }
@@ -636,13 +914,40 @@ class CameraViewModel : ViewModel() {
                             val width = imageProxy.width
                             val height = imageProxy.height
                             val fix = effectiveStretchFix()
-                            val nv21 = if (kotlin.math.abs(fix - 1f) > 0.01f) {
+                            val rawNv21 = if (kotlin.math.abs(fix - 1f) > 0.01f) {
                                 imageProxyToNv21Corrected(imageProxy, fix)
                             } else {
                                 imageProxyToNv21(imageProxy)
                             }
 
-                            if (jpegViewerCount.get() > 0) {
+                            // Background removal happens here, on the phone, before JPEG
+                            // encoding: the stream that leaves the device already has the
+                            // background replaced. Whether that is a chroma key or a person mask
+                            // is decided inside BackgroundRemover (possibly per frame, in AUTO).
+                            // The local preview also runs off these frames once removal is on,
+                            // which is the only way to see the result while tuning it.
+                            val removing = background.isActive
+                            // A pending plate capture has to see frames even when nobody is
+                            // watching the stream, otherwise pressing "capture" does nothing
+                            // until a viewer connects.
+                            val encodeFrame = jpegViewerCount.get() > 0 ||
+                                (removing && _showLocalPreview.value) ||
+                                (removing && background.plateNeedsFrames)
+
+                            val nv21 = if (removing && encodeFrame) {
+                                // The segmenter's mask is in the upright frame, so it needs the
+                                // rotation the buffer itself does not carry.
+                                background.process(
+                                    rawNv21,
+                                    width,
+                                    height,
+                                    imageProxy.imageInfo.rotationDegrees,
+                                )
+                            } else {
+                                rawNv21
+                            }
+
+                            if (encodeFrame) {
                                 try {
                                     val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
                                     val out = ByteArrayOutputStream()
@@ -668,6 +973,16 @@ class CameraViewModel : ViewModel() {
                             }
                             analyzerFrames++
                             analyzerBusyNs += nowNs - frameStart
+                            // A capture finishes on its own after a few frames, so the panel has to
+                            // hear about it even when the user is not touching anything.
+                            val plateNow = background.plateState
+                            if (plateNow != plateStateShadow) {
+                                plateStateShadow = plateNow
+                                mainHandler.post {
+                                    _plateState.value = plateNow
+                                    _chromaBackend.value = background.backendLabel
+                                }
+                            }
                             if (nowNs - analyzerWindowStart >= 2_000_000_000L) {
                                 val secs = (nowNs - analyzerWindowStart) / 1e9
                                 Log.d(
@@ -678,6 +993,13 @@ class CameraViewModel : ViewModel() {
                                 analyzerFrames = 0
                                 analyzerBusyNs = 0L
                                 analyzerWindowStart = nowNs
+                                // The live backend can change without the user touching anything
+                                // (AUTO re-resolving, or segmentation giving up), so the label is
+                                // refreshed from here instead of only on settings changes.
+                                mainHandler.post {
+                                    val label = background.backendLabel
+                                    if (_chromaBackend.value != label) _chromaBackend.value = label
+                                }
                             }
                         }
                     }
@@ -921,6 +1243,8 @@ class CameraViewModel : ViewModel() {
         val newFacing = if (_settings.value.lensFacing == CameraSelector.LENS_FACING_BACK)
             CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
         _settings.value = _settings.value.copy(lensFacing = newFacing)
+        // Another lens sees another room: the plate is worthless from here on.
+        background.clearPlate()
         refreshResolutions()
 
         when (_streamMode.value) {
@@ -947,6 +1271,7 @@ class CameraViewModel : ViewModel() {
 
     private fun applyCameraFacing(facing: Int) {
         _settings.value = _settings.value.copy(lensFacing = facing)
+        background.clearPlate()
         refreshResolutions()
         when (_streamMode.value) {
             StreamMode.MJPEG -> bindCamera()
@@ -1002,6 +1327,9 @@ class CameraViewModel : ViewModel() {
             return
         }
         _settings.value = _settings.value.copy(resolution = res)
+        // The plate is tied to the frame grid it was shot on; the subtractor would drop it anyway
+        // on the first odd-sized frame, this just makes it immediate.
+        background.clearPlate()
         when (_streamMode.value) {
             StreamMode.MJPEG -> {
                 if (cameraProvider != null) bindCamera()
@@ -1086,5 +1414,16 @@ class CameraViewModel : ViewModel() {
         unbindCamera()
         stopRtspCamera()
         AwaDiscovery.unregister()
+        background.close()
     }
+}
+
+/** "#RRGGBB", the format the HTTP API uses for colours. */
+private fun toHexColor(color: Int): String = "#%06X".format(color and 0xFFFFFF)
+
+private fun parseHexColor(value: String): Int? {
+    val hex = value.trim().removePrefix("#")
+    if (hex.length != 6 && hex.length != 8) return null
+    val parsed = hex.toLongOrNull(16) ?: return null
+    return if (hex.length == 6) (0xFF000000L or parsed).toInt() else parsed.toInt()
 }

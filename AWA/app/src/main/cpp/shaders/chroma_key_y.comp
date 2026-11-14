@@ -1,0 +1,98 @@
+#version 450
+// Green screen keyer - luma pass.
+//
+// One invocation produces four luma bytes, i.e. exactly one 32-bit word of the NV21 output. Byte
+// granular writes into a storage buffer would be race prone (several invocations can share a word),
+// so the work is split on word boundaries instead: this is why `width` must be a multiple of 4.
+//
+// The matte decision only uses the chroma cell the pixel belongs to, so the luma detail of the
+// subject is never part of the threshold - that is what keeps hair and fabric looking natural
+// instead of posterised.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std140, binding = 0) uniform Params {
+    // x = width, y = height, z = 1 when this frame also samples the key colour, w = unused
+    uvec4 dims;
+    // x = key Cb, y = key Cr, z = similarity (chroma units), w = soft edge width (chroma units)
+    vec4 key;
+    // x = spill amount, y = squared distance that still counts as "next to the screen",
+    // z = 1 for a blue screen, w = unused
+    vec4 repair;
+} p;
+
+layout(std430, binding = 1) readonly buffer Src { uint srcBytes[]; };
+layout(std430, binding = 2) writeonly buffer Dst { uint dstBytes[]; };
+layout(std430, binding = 3) readonly buffer Bg { uint bgBytes[]; };
+layout(std430, binding = 4) buffer Stats { uint sumU; uint sumV; uint hits; uint visited; };
+
+// The buffers are byte addressed for clarity; a word holds four consecutive bytes, little endian
+// (every Android ABI is little endian, and NV21 is a plain byte array).
+uint byteAt(uint i) {
+    return (srcBytes[i >> 2] >> ((i & 3u) << 3u)) & 0xFFu;
+}
+
+uint bgAt(uint i) {
+    return (bgBytes[i >> 2] >> ((i & 3u) << 3u)) & 0xFFu;
+}
+
+void main() {
+    uint w = p.dims.x;
+    uint h = p.dims.y;
+    uint wordsPerRow = w >> 2u;
+    uint gx = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (gx >= wordsPerRow || y >= h) {
+        return;
+    }
+
+    uint uvBase = w * h;
+    uint cellRow = (y >> 1u) * w;
+    uint lumaRow = y * w;
+    uint x0 = gx << 2u;
+
+    float similarity = p.key.z;
+    float fade = max(p.key.w, 1.0);
+    float spill = p.repair.x;
+    float guard2 = p.repair.y;
+    bool despill = spill > 0.0;
+
+    uint word = 0u;
+    for (uint k = 0u; k < 4u; ++k) {
+        uint x = x0 + k;
+
+        // Chroma of the 2x2 cell this pixel belongs to (NV21 stores V then U).
+        uint cellByte = uvBase + cellRow + (x & ~1u);
+        float v = float(byteAt(cellByte));
+        float u = float(byteAt(cellByte + 1u));
+
+        float du = u - p.key.x;
+        float dv = v - p.key.y;
+        float d2 = du * du + dv * dv;
+        float a = clamp((sqrt(d2) - similarity) / fade, 0.0, 1.0);
+
+        float luma = float(byteAt(lumaRow + x));
+
+        if (despill && a > 0.0 && d2 < guard2) {
+            // Rebuild RGB, cap the green channel at what a neutral pixel of the same brightness
+            // would carry, and integrate the corrected green back into luma. Correcting only the
+            // chroma of a lit green fringe keeps its brightness and turns the edge yellow.
+            float fu = u - 128.0;
+            float fv = v - 128.0;
+            float r = luma + 1.402 * fv;
+            float g = luma - 0.344136 * fu - 0.714136 * fv;
+            float b = luma + 1.772 * fu;
+            float cap = (r + b) * 0.5;
+            if (g > cap) {
+                float ng = g - (g - cap) * spill;
+                luma = 0.299 * r + 0.587 * ng + 0.114 * b;
+            }
+        }
+
+        float bg = float(bgAt(lumaRow + x));
+        float outY = a <= 0.0 ? bg : (a >= 1.0 ? luma : luma * a + bg * (1.0 - a));
+        word |= uint(clamp(outY + 0.5, 0.0, 255.0)) << (k << 3u);
+    }
+
+    dstBytes[gl_GlobalInvocationID.y * wordsPerRow + gx] = word;
+}

@@ -20,6 +20,21 @@ android {
         versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // The green screen keyer runs as Vulkan compute shaders (app/src/main/cpp).
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            // AGP's default; the NDK ships CMake support for Vulkan out of the box.
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -59,6 +74,11 @@ dependencies {
 
     implementation("com.github.pedroSG94.RootEncoder:library:2.7.5")
     implementation("com.github.pedroSG94:RTSP-Server:1.4.1")
+
+    // Person segmentation for background removal without a green screen. The bundled artifact keeps
+    // the model inside the APK (~4.5 MB) instead of downloading it through Play Services, so it also
+    // works on phones without Google Play Services.
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

@@ -22,3 +22,13 @@
 
 # Ktor references java.lang.management classes which are not available on Android
 -dontwarn java.lang.management.**
+
+# JNI entry points of the Vulkan keyer (app/src/main/cpp/chroma_vulkan.cpp) are looked up by name.
+-keep class com.soubhagyajit.awa.processing.vulkan.VulkanChromaKey { *; }
+
+# ML Kit resolves its bundled model and the segmenter implementation by name at runtime. Its AARs
+# ship consumer rules, but a release build that shrinks those away fails on the device with a
+# NoClassDefFoundError that only shows up when background removal is switched on - so keep the
+# entry points explicitly.
+-keep class com.google.mlkit.vision.segmentation.** { *; }
+-dontwarn com.google.mlkit.**

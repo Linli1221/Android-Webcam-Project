@@ -48,6 +48,31 @@ object VideoStreamServer {
         val stream_quality: Int,
         val flash: Boolean = false,
         val has_flash_unit: Boolean? = null,
+        // Background removal, applied on the phone before the frame is encoded
+        val chroma_key: Boolean = false,
+        /** chroma | person | auto */
+        val background_mode: String = "auto",
+        /** What is actually running, e.g. "Vulkan · Adreno (TM) 640", "CPU" or "ML Kit · person". */
+        val background_engine: String = "CPU",
+        val chroma_key_color: String = "#00FF00",
+        val chroma_key_similarity: Float = 0.28f,
+        val chroma_key_smoothness: Float = 0.12f,
+        val chroma_key_spill: Float = 0.45f,
+        val segmentation_threshold: Float = 0.5f,
+        val segmentation_feather: Float = 0.2f,
+        val segmentation_smoothing: Float = 0.35f,
+        // Background plate engine: shoot the empty scene, cut what differs
+        val plate_sensitivity: Float = 0.5f,
+        val plate_feather: Float = 0.35f,
+        val plate_smoothing: Float = 0.4f,
+        /** True once a plate has been shot for the current frame size. */
+        val plate_ready: Boolean = false,
+        val chroma_key_background: String = "solid",
+        val chroma_key_background_color: String = "#101018",
+        /** True when the Vulkan compute keyer is doing the work right now. */
+        val chroma_key_gpu: Boolean = false,
+        /** Human readable backend, e.g. "Vulkan · Adreno (TM) 640" or "CPU". */
+        val chroma_key_backend: String = "CPU",
     )
 
     @Serializable
@@ -62,6 +87,23 @@ object VideoStreamServer {
         val switchCamera: Boolean? = null,
         val camera: String,
         val stream_quality: Int? = null,
+        val chroma_key: Boolean? = null,
+        val background_mode: String? = null,
+        val chroma_key_color: String? = null,
+        val chroma_key_similarity: Float? = null,
+        val chroma_key_smoothness: Float? = null,
+        val chroma_key_spill: Float? = null,
+        val segmentation_threshold: Float? = null,
+        val segmentation_feather: Float? = null,
+        val segmentation_smoothing: Float? = null,
+        val plate_sensitivity: Float? = null,
+        val plate_feather: Float? = null,
+        val plate_smoothing: Float? = null,
+        /** Shoots a new background plate (also switches the engine to `plate`). */
+        val plate_capture: Boolean? = null,
+        val chroma_key_background_color: String? = null,
+        val chroma_key_background: String? = null,
+        val chroma_key_gpu: Boolean? = null,
     )
 
     var featuresProvider: (() -> FeaturesResponse)? = null
@@ -185,6 +227,21 @@ object VideoStreamServer {
                         focus_distance = params["focus_distance"]?.toFloatOrNull(),
                         switchCamera = if (params.contains("switch_camera")) true else null,
                         stream_quality = 80,
+                        chroma_key = params["chroma_key"]?.toBooleanStrictOrNull(),
+                        background_mode = params["background_mode"],
+                        chroma_key_color = params["chroma_key_color"],
+                        chroma_key_similarity = params["chroma_key_similarity"]?.toFloatOrNull(),
+                        chroma_key_smoothness = params["chroma_key_smoothness"]?.toFloatOrNull(),
+                        chroma_key_spill = params["chroma_key_spill"]?.toFloatOrNull(),
+                        segmentation_threshold = params["segmentation_threshold"]?.toFloatOrNull(),
+                        segmentation_feather = params["segmentation_feather"]?.toFloatOrNull(),
+                        segmentation_smoothing = params["segmentation_smoothing"]?.toFloatOrNull(),
+                        plate_sensitivity = params["plate_sensitivity"]?.toFloatOrNull(),
+                        plate_feather = params["plate_feather"]?.toFloatOrNull(),
+                        plate_smoothing = params["plate_smoothing"]?.toFloatOrNull(),
+                        plate_capture = params["plate_capture"]?.toBooleanStrictOrNull(),
+                        chroma_key_background_color = params["chroma_key_background_color"],
+                        chroma_key_gpu = params["chroma_key_gpu"]?.toBooleanStrictOrNull(),
                     )
 
                     val error = onSettingsUpdated?.invoke(update)

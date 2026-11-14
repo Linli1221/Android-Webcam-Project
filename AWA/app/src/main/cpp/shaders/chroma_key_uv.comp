@@ -1,0 +1,123 @@
+#version 450
+// Green screen keyer - chroma pass.
+//
+// One invocation writes four chroma bytes: two 2x2 cells, V and U each (NV21 order). It also
+// samples the frame border for the key colour when `dims.z` is set, which is what makes an
+// unevenly lit screen work: a dimmed corner loses chroma and drifts away from "pure green", so the
+// key colour has to follow the screen instead of being a constant.
+//
+// The border sampling is a handful of atomics per cell row, so it costs nothing worth measuring.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std140, binding = 0) uniform Params {
+    uvec4 dims;    // x width, y height, z = 1 to sample the key colour this frame
+    vec4 key;      // x key Cb, y key Cr, z similarity, w soft edge width
+    vec4 repair;   // x spill, y defended squared distance, z = 1 blue screen
+} p;
+
+layout(std430, binding = 1) readonly buffer Src { uint srcBytes[]; };
+layout(std430, binding = 2) writeonly buffer Dst { uint dstBytes[]; };
+layout(std430, binding = 3) readonly buffer Bg { uint bgBytes[]; };
+layout(std430, binding = 4) buffer Stats { uint sumU; uint sumV; uint hits; uint visited; };
+
+uint byteAt(uint i) {
+    return (srcBytes[i >> 2] >> ((i & 3u) << 3u)) & 0xFFu;
+}
+
+uint bgAt(uint i) {
+    return (bgBytes[i >> 2] >> ((i & 3u) << 3u)) & 0xFFu;
+}
+
+uint pack(float value) {
+    return uint(clamp(value + 0.5, 0.0, 255.0));
+}
+
+void main() {
+    uint w = p.dims.x;
+    uint h = p.dims.y;
+    uint uvW = w >> 1u;
+    uint uvH = h >> 1u;
+    uint wordsPerRow = uvW >> 1u;            // two cells per 32-bit word
+    uint gx = gl_GlobalInvocationID.x;
+    uint cy = gl_GlobalInvocationID.y;
+    if (gx >= wordsPerRow || cy >= uvH) {
+        return;
+    }
+
+    uint uvBase = w * h;
+    uint cellCount = uvW * uvH;
+    uint bgV = uvBase;                       // background layout: Y | V | U
+    uint bgU = uvBase + cellCount;
+
+    float similarity = p.key.z;
+    float fade = max(p.key.w, 1.0);
+    float spill = p.repair.x;
+    float guard2 = p.repair.y;
+    bool despill = spill > 0.0;
+
+    uint lumaRow = (cy << 1u) * w;
+    uint srcRow = uvBase + cy * w;
+    uint cellRowBase = cy * uvW;
+    uint cx0 = gx << 1u;
+
+    uint word = 0u;
+    for (uint k = 0u; k < 2u; ++k) {
+        uint cx = cx0 + k;
+        uint cell = cellRowBase + cx;
+
+        uint srcByte = srcRow + (cx << 1u);
+        float v = float(byteAt(srcByte));
+        float u = float(byteAt(srcByte + 1u));
+
+        float du = u - p.key.x;
+        float dv = v - p.key.y;
+        float d2 = du * du + dv * dv;
+        float a = clamp((sqrt(d2) - similarity) / fade, 0.0, 1.0);
+
+        if (despill && a > 0.0 && d2 < guard2) {
+            // Same repair as the luma pass, but applied to the colour: the luma used here is that
+            // of the cell's top-left pixel, which keeps the result identical to the CPU keyer.
+            float luma = float(byteAt(lumaRow + (cx << 1u)));
+            float fu = u - 128.0;
+            float fv = v - 128.0;
+            float r = luma + 1.402 * fv;
+            float g = luma - 0.344136 * fu - 0.714136 * fv;
+            float b = luma + 1.772 * fu;
+            float cap = (r + b) * 0.5;
+            if (g > cap) {
+                float ng = g - (g - cap) * spill;
+                u = 128.0 - 0.168736 * r - 0.331264 * ng + 0.5 * b;
+                v = 128.0 + 0.5 * r - 0.418688 * ng - 0.081312 * b;
+            }
+        }
+
+        float bgv = float(bgAt(bgV + cell));
+        float bgu = float(bgAt(bgU + cell));
+        float outV = a <= 0.0 ? bgv : (a >= 1.0 ? v : v * a + bgv * (1.0 - a));
+        float outU = a <= 0.0 ? bgu : (a >= 1.0 ? u : u * a + bgu * (1.0 - a));
+
+        uint shift = k << 4u;
+        word |= (pack(outV) | (pack(outU) << 8u)) << shift;
+
+        // --- key colour sampling: border band only, every other cell (same as the CPU keyer) ---
+        if (p.dims.z == 1u) {
+            uint bandX = max(uvW / 14u, 2u);
+            uint bandY = max(uvH / 14u, 2u);
+            bool inBand = cy < bandY || cy >= uvH - bandY || cx < bandX || cx >= uvW - bandX;
+            if (inBand && (cx & 1u) == 0u) {
+                float score = p.repair.z > 0.5
+                    ? min(u - 128.0, 128.0 - v)      // blue screen: Cb above neutral, Cr below
+                    : min(128.0 - u, 128.0 - v);     // green screen: both below neutral
+                if (score > 16.0) {
+                    atomicAdd(sumU, uint(u + 0.5));
+                    atomicAdd(sumV, uint(v + 0.5));
+                    atomicAdd(hits, 1u);
+                }
+                atomicAdd(visited, 1u);
+            }
+        }
+    }
+
+    dstBytes[uvBase / 4u + cy * wordsPerRow + gx] = word;
+}

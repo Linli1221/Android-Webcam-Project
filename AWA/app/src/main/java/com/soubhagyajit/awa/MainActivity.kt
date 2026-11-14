@@ -19,6 +19,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -61,6 +63,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -74,6 +77,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
@@ -89,6 +93,8 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.soubhagyajit.awa.processing.BackgroundRemover
+import com.soubhagyajit.awa.processing.PlateSubtractor
 import com.soubhagyajit.awa.ui.theme.AWATheme
 import com.soubhagyajit.awa.ui.components.Preview
 import com.soubhagyajit.awa.viewModel.CameraViewModel
@@ -529,6 +535,14 @@ fun SettingsPanel(
                                 }
                             )
                             Spacer(modifier = Modifier.height(16.dp))
+
+                            ChromaKeySection(camView = camView, settings = settings)
+                        } else {
+                            Text(
+                                "Background removal works on the MJPEG stream. Switch the stream type to MJPEG to do it on the phone.",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 12.sp
+                            )
                         }
                     }
 
@@ -588,11 +602,345 @@ fun StreamTypeSelector(camView: CameraViewModel) {
     }
 }
 
+private val CHROMA_KEY_COLORS = listOf(0xFF00FF00.toInt(), 0xFF0000FF.toInt())
+private val CHROMA_BACKDROPS = listOf(
+    0xFF101018.toInt(), 0xFF000000.toInt(), 0xFFFFFFFF.toInt(), 0xFF1E6FD9.toInt()
+)
+
+@Composable
+fun ChromaKeySection(camView: CameraViewModel, settings: CameraViewModel.CameraSettings) {
+    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) camView.setChromaBackgroundImage(uri)
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column {
+                Text("Background removal", color = Color.White, fontSize = 16.sp)
+                Text(
+                    "Removed on the phone, before encoding",
+                    color = Color.White.copy(alpha = 0.55f),
+                    fontSize = 11.sp
+                )
+            }
+            Switch(
+                checked = settings.chromaKeyEnabled,
+                onCheckedChange = { camView.setChromaKeyEnabled(it) }
+            )
+        }
+
+        if (settings.chromaKeyEnabled) {
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ModeChip(
+                    "Auto",
+                    settings.backgroundMode == BackgroundRemover.Mode.AUTO
+                ) { camView.setBackgroundMode(BackgroundRemover.Mode.AUTO) }
+                ModeChip(
+                    "Screen",
+                    settings.backgroundMode == BackgroundRemover.Mode.CHROMA_KEY
+                ) { camView.setBackgroundMode(BackgroundRemover.Mode.CHROMA_KEY) }
+                ModeChip(
+                    "Person",
+                    settings.backgroundMode == BackgroundRemover.Mode.PERSON
+                ) { camView.setBackgroundMode(BackgroundRemover.Mode.PERSON) }
+                ModeChip(
+                    "Plate",
+                    settings.backgroundMode == BackgroundRemover.Mode.PLATE
+                ) { camView.setBackgroundMode(BackgroundRemover.Mode.PLATE) }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                when (settings.backgroundMode) {
+                    BackgroundRemover.Mode.CHROMA_KEY ->
+                        "Best edge quality, but needs a green or blue screen behind you."
+                    BackgroundRemover.Mode.PERSON ->
+                        "Works with any background. Segments one person; costs more CPU than a screen."
+                    BackgroundRemover.Mode.PLATE ->
+                        "Shoot the empty room once, then everything that differs is cut. Sharpest edge of the three, as long as the phone does not move."
+                    BackgroundRemover.Mode.AUTO ->
+                        "Uses a coloured screen when it sees one, otherwise segments the person."
+                },
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 11.sp
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                // Tells you what is really running right now, which is what matters when AUTO is
+                // in charge: a driver that refuses the shaders drops back to the CPU silently.
+                "Running: ${camView.chromaBackend.value}",
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 11.sp
+            )
+
+            if (settings.backgroundMode != BackgroundRemover.Mode.PERSON &&
+                settings.backgroundMode != BackgroundRemover.Mode.PLATE
+            ) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text("Coloured screen", color = Color.White, fontSize = 12.sp)
+
+                Row(
+                    modifier = Modifier.padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    CHROMA_KEY_COLORS.forEach { value ->
+                        SwatchDot(
+                            color = Color(value),
+                            selected = settings.chromaKeyColor == value,
+                            onClick = { camView.setChromaKeyColor(value) }
+                        )
+                    }
+                    Text(
+                        if (settings.chromaKeyColor == CHROMA_KEY_COLORS[1]) "Blue screen" else "Green screen",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                ChromaSlider("Similarity", settings.chromaSimilarity, 0.05f..0.9f) {
+                    camView.setChromaSimilarity(it)
+                }
+                ChromaSlider("Soft edge", settings.chromaSmoothness, 0f..0.5f) {
+                    camView.setChromaKeySmoothness(it)
+                }
+                ChromaSlider("Spill removal", settings.chromaSpill, 0f..1f) {
+                    camView.setChromaSpill(it)
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("GPU keying (Vulkan)", color = Color.White, fontSize = 12.sp)
+                        Text(
+                            "Two compute passes per frame; drops back to the CPU when the driver refuses them.",
+                            color = Color.White.copy(alpha = 0.5f),
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = settings.chromaGpu,
+                        onCheckedChange = { camView.setChromaGpu(it) }
+                    )
+                }
+
+                if (settings.resolution == CameraViewModel.StreamResolution.P1080) {
+                    Text(
+                        if (settings.chromaGpu)
+                            "1080p on the GPU: two compute dispatches per frame, the CPU only copies the frame in and out."
+                        else
+                            "1080p keying on the CPU is heavy - 720p keeps the frame rate up, or enable the GPU path.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            if (settings.backgroundMode != BackgroundRemover.Mode.CHROMA_KEY &&
+                settings.backgroundMode != BackgroundRemover.Mode.PLATE
+            ) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text("Person mask", color = Color.White, fontSize = 12.sp)
+                Spacer(modifier = Modifier.height(6.dp))
+
+                ChromaSlider("Cut", settings.personThreshold, 0.3f..0.7f) {
+                    camView.setPersonThreshold(it)
+                }
+                ChromaSlider("Edge softness", settings.personFeather, 0.02f..0.5f) {
+                    camView.setPersonFeather(it)
+                }
+                ChromaSlider("Stabilise", settings.personSmooth, 0f..0.85f) {
+                    camView.setPersonSmooth(it)
+                }
+
+                Text(
+                    "The mask trails the frame by a frame or two; stabilise trades more lag for less flicker.",
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+                if (settings.resolution == CameraViewModel.StreamResolution.P1080) {
+                    Text(
+                        "Segmentation runs at 720p-equivalent cost, but 1080p compositing still costs more per frame.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            if (settings.backgroundMode == BackgroundRemover.Mode.PLATE) {
+                Spacer(modifier = Modifier.height(14.dp))
+                Text("Background shot", color = Color.White, fontSize = 12.sp)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    when (camView.plateState.value) {
+                        PlateSubtractor.State.NONE ->
+                            "Step out of the frame, point the camera at the empty scene, then capture. " +
+                                "Three frames are averaged, so hold still for a moment."
+                        PlateSubtractor.State.CAPTURING ->
+                            "Capturing… keep the scene empty and the phone still."
+                        PlateSubtractor.State.READY ->
+                            "Captured. The matte now follows your real silhouette, hair included - " +
+                                "but only while the tripod does not move."
+                    },
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = { camView.capturePlate() },
+                        enabled = camView.plateState.value != PlateSubtractor.State.CAPTURING,
+                    ) {
+                        Text(
+                            if (camView.plateState.value == PlateSubtractor.State.READY) "Retake" else "Capture",
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (camView.plateState.value == PlateSubtractor.State.READY) {
+                        TextButton(onClick = { camView.clearPlate() }) {
+                            Text("Clear", fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                ChromaSlider("Sensitivity", settings.plateSensitivity, 0.15f..0.85f) {
+                    camView.setPlateSensitivity(it)
+                }
+                ChromaSlider("Edge softness", settings.plateFeather, 0f..0.8f) {
+                    camView.setPlateFeather(it)
+                }
+                ChromaSlider("Stabilise", settings.plateSmooth, 0f..0.9f) {
+                    camView.setPlateSmooth(it)
+                }
+                Text(
+                    "Sensitivity trades leftovers of the room against keeping clothes and hair that " +
+                        "match the wall. Slow light changes are absorbed; a moved phone is not - re-capture then.",
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+                if (camView.plateState.value != PlateSubtractor.State.READY) {
+                    Text(
+                        "Without a plate the frame passes through unchanged - nothing is cut yet.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
+                }
+                if (settings.resolution == CameraViewModel.StreamResolution.P1080) {
+                    Text(
+                        "1080p costs six passes over the frame on the CPU (difference, blur, stabilise, " +
+                            "composite); 720p keeps the frame rate up.",
+                        color = Color.White.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            Text("Replace background", color = Color.White, fontSize = 12.sp)
+            Row(
+                modifier = Modifier.padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CHROMA_BACKDROPS.forEach { value ->
+                    SwatchDot(
+                        color = Color(value),
+                        selected = !settings.chromaUseImageBackground && settings.chromaBackgroundColor == value,
+                        onClick = { camView.setChromaBackgroundColor(value) }
+                    )
+                }
+                TextButton(onClick = { pickImage.launch("image/*") }) {
+                    Text(if (settings.chromaUseImageBackground) "Change photo" else "Photo...", fontSize = 12.sp)
+                }
+            }
+            if (settings.chromaUseImageBackground) {
+                Text(
+                    settings.chromaBackgroundLabel ?: "Custom image",
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontSize = 11.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(
+                if (selected) Color.White.copy(alpha = 0.22f) else Color.White.copy(alpha = 0.06f)
+            )
+            .border(
+                width = 1.dp,
+                color = if (selected) Color.White.copy(alpha = 0.75f) else Color.White.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(50)
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 7.dp)
+    ) {
+        Text(label, color = Color.White, fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun SwatchDot(color: Color, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(26.dp)
+            .clip(CircleShape)
+            .background(color)
+            .border(
+                width = if (selected) 3.dp else 1.dp,
+                color = if (selected) Color.White else Color.White.copy(alpha = 0.35f),
+                shape = CircleShape
+            )
+            .clickable { onClick() }
+    )
+}
+
+@Composable
+private fun ChromaSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text("$label  ${"%.2f".format(value)}", color = Color.White, fontSize = 12.sp)
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            valueRange = range,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(28.dp)
+        )
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ResolutionDropdown(camView: CameraViewModel, settings: CameraViewModel.CameraSettings) {
     val currentResolution = settings.resolution
     var expanded by remember { mutableStateOf(false) }
+
 
     ExposedDropdownMenuBox (
         expanded = expanded,

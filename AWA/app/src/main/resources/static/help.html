@@ -105,6 +105,82 @@
     </pre>
 </div>
 </div><div class="card">
+    <h3><span class="method get">Get</span> / <span class="method post">Post</span> <code>background removal</code></h3>
+    <p>
+        The background is removed on the phone, before the frame is encoded, so anything reading the
+        MJPEG stream already receives the composited picture. Three engines are available: a chroma key
+        (needs a green or blue screen), a person segmentation model (works with any background) and a
+        background plate (shoot the empty room once; the camera must stay put).
+        <code>background_mode</code> picks one. Send any of these fields to
+        <code>POST /settings</code>, or pass them as query parameters to <code>GET /control</code>.
+        They are also returned by <code>GET /settings</code>.
+    </p>
+    <pre><code>
+{
+    "camera": "back",
+    "chroma_key": true,
+    "background_mode": "auto",
+    "chroma_key_color": "#00FF00",
+    "chroma_key_similarity": 0.28,
+    "chroma_key_smoothness": 0.12,
+    "chroma_key_spill": 0.45,
+    "segmentation_threshold": 0.5,
+    "segmentation_feather": 0.2,
+    "segmentation_smoothing": 0.35,
+    "plate_sensitivity": 0.5,
+    "plate_feather": 0.35,
+    "plate_smoothing": 0.4,
+    "chroma_key_background_color": "#101018",
+    "chroma_key_gpu": true
+}</code>
+    </pre>
+    <p>
+        <code>background_mode</code> is <code>"auto"</code> (default), <code>"chroma"</code>,
+        <code>"person"</code> or <code>"plate"</code>. <code>auto</code> decides from the frame
+        border: a coloured screen filling the border selects the keyer, anything else selects the
+        segmentation model. The decision is re-checked roughly every two seconds and only changes
+        after two agreeing probes, so a green object entering the shot cannot flip the stream back and
+        forth.
+    </p>
+    <p>
+        Chroma key: <code>chroma_key_similarity</code> (0..1) is how much colour difference still
+        counts as screen. <code>chroma_key_smoothness</code> (0..0.6) is the width of the soft edge,
+        which is what keeps hair and shoulders from looking cut out.
+        <code>chroma_key_spill</code> (0..1) removes the green cast the screen bounces onto the
+        subject.
+    </p>
+    <p>
+        Person segmentation: <code>segmentation_threshold</code> (0.1..0.9) moves the cut in or out,
+        <code>segmentation_feather</code> (0.01..0.5) sets how soft the edge is, and
+        <code>segmentation_smoothing</code> (0..0.9) averages consecutive masks - more smoothing is
+        less flicker for a little more lag. The mask trails the frame by one or two frames by design;
+        waiting for it inside the capture loop would halve the frame rate.
+    </p>
+    <p>
+        Background plate: <code>plate_capture=true</code> (GET <code>/control</code> or POST
+        <code>/settings</code>) shoots a new plate from the next frames and switches
+        <code>background_mode</code> to <code>"plate"</code> - make sure the scene is empty for a
+        moment. <code>plate_sensitivity</code> (0.1..0.9) trades leftovers of the room against
+        keeping clothes and hair that match the wall, <code>plate_feather</code> (0..1.5) is the soft
+        edge and <code>plate_smoothing</code> (0..0.9) averages consecutive mattes.
+        <code>plate_ready</code> in <code>GET /settings</code> tells you whether a plate exists for
+        the current frame size; a change of resolution or camera drops it.
+    </p>
+    <p>
+        <code>chroma_key_gpu</code> selects the Vulkan compute keyer for the chroma path;
+        <code>false</code> forces the CPU implementation. Person segmentation always composites on
+        the CPU. <code>GET /settings</code> reports what is really running as
+        <code>background_engine</code> (for example <code>"Vulkan · Adreno (TM) 640"</code>,
+        <code>"CPU"</code> or <code>"ML Kit · person"</code>), because a device without a usable
+        driver - or without a working model - falls back silently.
+    </p>
+    <p>
+        The key colour is re-sampled from the border of the frame a few times per second, so an
+        unevenly lit screen still keys out; <code>chroma_key_color</code> is the starting point and
+        the fallback. A picture as replacement background can only be picked on the phone.
+    </p>
+</div>
+<div class="card">
     <h3>Note:</h3>
     <p>Zoom is not supported yet. For more details check out : <a href="https://github.com/soubhagyajit/Android-Webcam-Project">Github Project</a></p>
     <pre><code>
