@@ -204,7 +204,8 @@ The virtual webcam should appear automatically in supported video applications.
 
 ### Video Resolution
 
-Available resolution options depend on your Android device's camera capabilities.
+Available resolution options depend on your Android device's camera capabilities. The list is read
+from the camera itself, so it contains exactly what that sensor offers - no fixed table.
 
 | Resolution | Dimensions | Recommended Usage |
 |:---|:---|:---|
@@ -212,8 +213,23 @@ Available resolution options depend on your Android device's camera capabilities
 | 720p | 1280 × 720 | Older devices |
 | 1080p | 1920 × 1080 | High-quality streaming |
 | 4K | 3840 × 2160 | Maximum supported quality |
+| native | sensor size, e.g. 4000 × 3000 | Full sensor detail, at a lower frame rate |
 
 Change the resolution through the mobile application settings or the relevant configuration in the source code.
+
+**Native (sensor) resolution.** In MJPEG mode the list is not capped at the camcorder profile any
+more - that cap belongs to the hardware video encoder, and the MJPEG path never uses it - so the
+sensor's own frame is offered as the last entry, marked `· sensor` and reachable over HTTP as
+`resolution_str=native`. Three things are worth knowing:
+
+- It stops at **12 MP**. A frame costs 1.5 bytes per pixel as NV21 and the pipeline holds two or
+  three copies plus the JPEG buffer, so 12 MP is already ~60 MB of peak allocation.
+- Every extra pixel is JPEG-encoded and (if background removal is on) masked on the CPU, so the frame
+  rate drops roughly in proportion. 1080p is the practical ceiling for 30 fps.
+- If the camera refuses to run that size next to a preview, the app logs it, drops to the largest
+  size below it and shows `Camera delivers …` under the dropdown, rather than leaving a black screen.
+
+In RTSP mode the cap stays, because there the hardware encoder really does decide what it can take.
 
 ### Background Removal
 

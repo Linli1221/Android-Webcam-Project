@@ -739,12 +739,14 @@ fun ChromaKeySection(camView: CameraViewModel, settings: CameraViewModel.CameraS
                     )
                 }
 
-                if (settings.resolution == CameraViewModel.StreamResolution.P1080) {
+                if (settings.resolution.pixels >= HD_PIXELS) {
                     Text(
                         if (settings.chromaGpu)
-                            "1080p on the GPU: two compute dispatches per frame, the CPU only copies the frame in and out."
+                            "%.1f MP on the GPU: two compute dispatches per frame, the CPU only copies the frame in and out."
+                                .format(settings.resolution.megapixels)
                         else
-                            "1080p keying on the CPU is heavy - 720p keeps the frame rate up, or enable the GPU path.",
+                            "Keying %.1f MP on the CPU is heavy - 720p keeps the frame rate up, or enable the GPU path."
+                                .format(settings.resolution.megapixels),
                         color = Color.White.copy(alpha = 0.6f),
                         fontSize = 11.sp
                     )
@@ -773,9 +775,10 @@ fun ChromaKeySection(camView: CameraViewModel, settings: CameraViewModel.CameraS
                     color = Color.White.copy(alpha = 0.6f),
                     fontSize = 11.sp
                 )
-                if (settings.resolution == CameraViewModel.StreamResolution.P1080) {
+                if (settings.resolution.pixels >= HD_PIXELS) {
                     Text(
-                        "Segmentation runs at 720p-equivalent cost, but 1080p compositing still costs more per frame.",
+                        "The mask itself is 256x256, but compositing is per pixel - %.1f MP still costs more per frame."
+                            .format(settings.resolution.megapixels),
                         color = Color.White.copy(alpha = 0.6f),
                         fontSize = 11.sp
                     )
@@ -840,10 +843,11 @@ fun ChromaKeySection(camView: CameraViewModel, settings: CameraViewModel.CameraS
                         fontSize = 11.sp
                     )
                 }
-                if (settings.resolution == CameraViewModel.StreamResolution.P1080) {
+                if (settings.resolution.pixels >= HD_PIXELS) {
                     Text(
-                        "1080p costs six passes over the frame on the CPU (difference, blur, stabilise, " +
-                            "composite); 720p keeps the frame rate up.",
+                        ("The plate path is six passes over the whole frame on the CPU, so " +
+                                "%.1f MP will drop the frame rate; 720p keeps it up.")
+                            .format(settings.resolution.megapixels),
                         color = Color.White.copy(alpha = 0.6f),
                         fontSize = 11.sp
                     )
@@ -935,42 +939,76 @@ private fun ChromaSlider(
     }
 }
 
+/** 1080p: above this the per-frame cost of the background engines stops being free. */
+private const val HD_PIXELS = 1920 * 1080
+
+/** Pixel count of a stream size, used by the "this will cost you" hints. */
+private val CameraViewModel.StreamResolution.pixels: Int
+    get() = size.width * size.height
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ResolutionDropdown(camView: CameraViewModel, settings: CameraViewModel.CameraSettings) {
     val currentResolution = settings.resolution
+    val native = settings.nativeResolution
+    val delivered = settings.activeSize
     var expanded by remember { mutableStateOf(false) }
 
-
-    ExposedDropdownMenuBox (
-        expanded = expanded,
-        onExpandedChange = { expanded = it }
-    ) {
-        OutlinedTextField(
-            value = currentResolution.label,
-            onValueChange = {},
-            readOnly = true,
-            label = { Text("Resolution") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .menuAnchor()
-                .fillMaxWidth()
-        )
-
-        ExposedDropdownMenu(
+    Column {
+        ExposedDropdownMenuBox (
             expanded = expanded,
-            onDismissRequest = { expanded = false }
+            onExpandedChange = { expanded = it }
         ) {
-            settings.supportedResolutions.forEach { res ->
-                DropdownMenuItem(
-                    text = { Text(res.label) },
-                    onClick = {
-                        camView.setResolution(res)
-                        Log.d("AWA", "Resolution set to ${res.label}:${res.size}")
-                        expanded = false
-                    }
-                )
+            OutlinedTextField(
+                value = currentResolution.label,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Resolution") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+            )
+
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                settings.supportedResolutions.forEach { res ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (res == native) "${res.label} · sensor"
+                                else res.label
+                            )
+                        },
+                        onClick = {
+                            camView.setResolution(res)
+                            Log.d("AWA", "Resolution set to ${res.label}:${res.size}")
+                            expanded = false
+                        }
+                    )
+                }
             }
+        }
+
+        // CameraX may hand over a different size than the one asked for - the sensor may refuse a
+        // size next to a preview, or the bind may have fallen back. Show what is really arriving.
+        if (delivered != null && delivered != currentResolution.size) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                "Camera delivers ${delivered.width}x${delivered.height}",
+                color = Color(0xFFFFC107),
+                fontSize = 11.sp
+            )
+        } else if (currentResolution.size.width * currentResolution.size.height > 1920 * 1080) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                "Sensor native: %.1f MP per frame, so the frame rate will be lower"
+                    .format(currentResolution.megapixels),
+                color = Color.White.copy(alpha = 0.6f),
+                fontSize = 11.sp
+            )
         }
     }
 }

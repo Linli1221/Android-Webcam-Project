@@ -61,6 +61,19 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.abs
 
+/**
+ * Widest frame accepted from the sensor. Nothing advertises more than 8K for YUV output, so this
+ * only filters nonsense entries.
+ */
+private const val MAX_FRAME_WIDTH = 8192
+
+/**
+ * Biggest frame carried through the MJPEG path. A frame is 1.5 bytes per pixel as NV21 and the
+ * pipeline holds two or three copies plus the JPEG buffer while encoding, so 12 MP is about 60 MB
+ * of peak allocation - the point where a mid-range phone starts to thrash, not a hard limit.
+ */
+private const val NATIVE_MAX_PIXELS = 12_000_000
+
 class CameraViewModel : ViewModel() {
 
     enum class StreamMode(val label: String) {
@@ -78,8 +91,13 @@ class CameraViewModel : ViewModel() {
                 1280 to 720 -> "$key (720p)"
                 1920 to 1080 -> "$key (1080p)"
                 3840 to 2160 -> "$key (4K)"
-                else -> key
+                // Everything else is a size the sensor itself offers, so megapixels tell the user
+                // more than a "p" number that does not exist.
+                else -> "$key (%.1fMP)".format(size.width * size.height / 1e6f)
             }
+
+        /** Sensor pixels in millions, for the "this is going to cost you" hints. */
+        val megapixels: Float get() = size.width * size.height / 1e6f
 
         /** CameraX only understands 4:3 and 16:9, so use whichever is closer. */
         val aspectRatio: Int
@@ -103,6 +121,11 @@ class CameraViewModel : ViewModel() {
         // CHANGED: resolutions the bound camera can actually deliver in MJPEG (CameraX) mode.
         // Defaults to everything until the first bindCamera() computes the real list.
         val supportedResolutions: List<StreamResolution> = StreamResolution.FALLBACK,
+        /**
+         * Largest size this camera advertises for the mode in use - the sensor's own frame, not a
+         * size the video encoder happens to like. Null until the camera has been queried.
+         */
+        val nativeResolution: StreamResolution? = null,
         // Size of the frames the camera is really delivering (null until the first frame arrives)
         val activeSize: Size? = null,
         // Correction for cameras whose 1080p output is stretched. 1.0 = off.
@@ -395,7 +418,7 @@ class CameraViewModel : ViewModel() {
     private fun resolutionsForCurrentMode(): List<StreamResolution> = _settings.value.supportedResolutions
 
     private fun isUsableSize(s: Size): Boolean {
-        if (s.width < 640 || s.width > 3840 || s.height <= 0) return false
+        if (s.width < 640 || s.width > MAX_FRAME_WIDTH || s.height <= 0) return false
         val r = s.width.toFloat() / s.height
         return abs(r - 4f / 3f) < 0.02f || abs(r - 16f / 9f) < 0.02f
     }
@@ -405,6 +428,11 @@ class CameraViewModel : ViewModel() {
      * least 640 wide are kept, because those are the shapes CameraX can be asked for.
      * Preview and video-recording sizes are always included, so sizes that are only offered for
      * video (for example 1080p on older phones) still show up.
+     *
+     * In MJPEG mode the list goes up to the sensor's own largest size (12 MP at most, see
+     * [NATIVE_MAX_PIXELS]) rather than stopping at the camcorder profile - that cap belongs to the
+     * hardware video encoder, and the MJPEG path never touches it. In RTSP mode the cap stays,
+     * because there the encoder really does decide what it will take.
      */
     private fun queryResolutions(lensFacing: Int, forRtsp: Boolean): List<StreamResolution> {
         val ctx = appContext ?: return StreamResolution.FALLBACK
@@ -431,8 +459,9 @@ class CameraViewModel : ViewModel() {
             )
 
             // The camera lists sizes it cannot stream (for example 4128x3096 on a LIMITED camera).
-            // The largest size it can stream alongside a preview is its biggest camcorder profile
-            // (CameraX's "RECORD" size), so use that as the upper limit.
+            // The largest size the *video encoder* can stream alongside a preview is its biggest
+            // camcorder profile (CameraX's "RECORD" size). That is the right cap for RTSP and no
+            // cap at all for MJPEG, which is where the sensor's own sizes become available.
             val recordMax: Size? = try {
                 val camId = id.toInt()
                 if (CamcorderProfile.hasProfile(camId, CamcorderProfile.QUALITY_HIGH)) {
@@ -442,7 +471,7 @@ class CameraViewModel : ViewModel() {
             } catch (e: Exception) {
                 null
             }
-            val maxArea = recordMax?.let { it.width * it.height } ?: Int.MAX_VALUE
+            val profileArea = recordMax?.let { it.width * it.height } ?: Int.MAX_VALUE
             Log.d("AWA", "Largest streamable size (camcorder profile): $recordMax")
 
             val raw = HashSet<Size>()
@@ -450,9 +479,14 @@ class CameraViewModel : ViewModel() {
             raw.addAll(video)
             if (!forRtsp) raw.addAll(yuv)
 
-            val list = raw.filter { isUsableSize(it) && it.width * it.height <= maxArea }
+            val pixelCap = if (forRtsp) profileArea else NATIVE_MAX_PIXELS
+            val list = raw.filter { isUsableSize(it) && it.width * it.height <= pixelCap }
                 .map { StreamResolution(it) }
                 .sortedBy { it.size.width * it.size.height }
+            val tooBig = raw.filter { isUsableSize(it) && it.width * it.height > pixelCap }
+            if (tooBig.isNotEmpty()) {
+                Log.d("AWA", "Left out, too large for this path: ${tooBig.sortedBy { it.width * it.height }.joinToString()}")
+            }
             Log.d(
                 "AWA",
                 "Resolutions (${if (lensFacing == CameraSelector.LENS_FACING_BACK) "back" else "front"}, " +
@@ -479,7 +513,13 @@ class CameraViewModel : ViewModel() {
             val area = current.size.width * current.size.height
             list.minByOrNull { abs(it.size.width * it.size.height - area) } ?: current
         }
-        _settings.value = _settings.value.copy(supportedResolutions = list, resolution = chosen)
+        _settings.value = _settings.value.copy(
+            supportedResolutions = list,
+            resolution = chosen,
+            // The list is sorted smallest first, so its last entry is what this camera calls its
+            // own frame. In MJPEG that is the sensor size, in RTSP the biggest the encoder takes.
+            nativeResolution = list.lastOrNull(),
+        )
     }
 
     fun initialize(context: Context) {
@@ -571,7 +611,12 @@ class CameraViewModel : ViewModel() {
         VideoStreamServer.onSettingsUpdated = { update ->
             val isRtspActive = _streamMode.value == StreamMode.H264_RTSP && rtspCamera != null
             val requestedRes = update.resolution_str?.let { rs ->
-                resolutionsForCurrentMode().find { it.key == rs }
+                // "native" is the sensor's own frame: whatever this camera calls its biggest size.
+                if (rs == "native" || rs == "max") {
+                    _settings.value.nativeResolution
+                } else {
+                    resolutionsForCurrentMode().find { it.key == rs }
+                }
             }
 
             if (update.resolution_str != null && isRtspActive) {
@@ -1006,7 +1051,21 @@ class CameraViewModel : ViewModel() {
                 }
 
             provider.unbindAll()
-            val camera = provider.bindToLifecycle(owner, cameraSelector, previewUseCase, imageAnalysis)
+            val camera = try {
+                provider.bindToLifecycle(owner, cameraSelector, previewUseCase, imageAnalysis)
+            } catch (e: Exception) {
+                // A sensor-native size can be advertised for YUV and still be rejected once a
+                // preview has to run next to it. Step down instead of leaving a black screen.
+                val fallback = safeFallbackFor(activeRes)
+                Log.e("AWA", "Binding ${activeRes.key} failed, retrying at ${fallback?.key}", e)
+                if (fallback != null && fallback != activeRes) {
+                    _settings.value = _settings.value.copy(resolution = fallback)
+                    mainHandler.post { bindCamera() }
+                } else {
+                    Log.e("AWA", "No smaller size to fall back to - camera stays unbound")
+                }
+                return@addListener
+            }
             mjpegCamera = camera
             Log.d(
                 "AWA",
@@ -1034,6 +1093,17 @@ class CameraViewModel : ViewModel() {
                     .onFailure { Log.e("AWA", "MJPEG zoom reapply failed", it) }
             }
         }, ContextCompat.getMainExecutor(ctx))
+    }
+
+    /**
+     * Largest size below 1080p (or 1080p itself) that the camera offers, used when binding a
+     * sensor-native frame fails. Falls back to the smallest listed size rather than to nothing.
+     */
+    private fun safeFallbackFor(failed: StreamResolution): StreamResolution? {
+        val list = resolutionsForCurrentMode().filter { it != failed }
+        if (list.isEmpty()) return null
+        val hdArea = StreamResolution.P1080.size.width * StreamResolution.P1080.size.height
+        return list.lastOrNull { it.size.width * it.size.height <= hdArea } ?: list.first()
     }
 
     private fun unbindCamera() {
