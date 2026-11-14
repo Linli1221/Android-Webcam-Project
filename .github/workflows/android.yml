@@ -1,0 +1,103 @@
+name: Android
+
+# The APK is the only thing that can prove the Kotlin and the Vulkan native module still compile
+# together, so this is the build that gates everything else.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # AGP 9.2 pulls whatever else it is missing once the licences are accepted. The packages
+      # listed here are the ones the native keyer needs (CMake 3.22.1 is pinned in build.gradle.kts,
+      # NDK 28.2.13676358 is AGP 9.2's default) and are cheaper to fetch up front than mid-build.
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install "build-tools;36.0.0" "platform-tools" "cmake;3.22.1" "ndk;28.2.13676358"
+
+      - name: Show installed SDK packages
+        run: sdkmanager --list_installed | sed -n '1,40p'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        working-directory: AWA
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:testDebugUnitTest
+
+      - name: Report APK size and native libs
+        working-directory: AWA
+        run: |
+          for f in app/build/outputs/apk/debug/*.apk; do
+            echo "$f: $(du -h "$f" | cut -f1)"
+          done
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep -E 'lib/|assets/shaders' || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: awa-debug-apk
+          path: AWA/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    name: Attach APK to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: apk
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: awa-debug-apk
+          path: apk
+
+      - name: Rename for the release
+        run: |
+          cd apk
+          for f in *.apk; do mv "$f" "AWA-${GITHUB_REF_NAME}-debug.apk"; done
+          ls -la
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: apk/*.apk
+          generate_release_notes: true
+          body: |
+            `AWA-${{ github.ref_name }}-debug.apk` - debug-signed, so it installs straight from the
+            browser (`adb install -r`, or "install unknown apps" on the phone). The release build
+            needs a signing key, which is not in the repository.
+
+            Background removal (green screen / person segmentation / background plate) is described
+            in the README.

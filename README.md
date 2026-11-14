@@ -19,6 +19,8 @@ A free, open-source webcam solution featuring high-resolution video streaming, U
 ![Android](https://img.shields.io/badge/Android-AWA-3DDC84?logo=android&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows%2010%20%7C%2011-AWC-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/github/license/soubhagyajit/Android-Webcam-Project)
+[![Android](https://github.com/Linli1221/Android-Webcam-Project/actions/workflows/android.yml/badge.svg)](https://github.com/Linli1221/Android-Webcam-Project/actions/workflows/android.yml)
+[![Algorithm checks](https://github.com/Linli1221/Android-Webcam-Project/actions/workflows/checks.yml/badge.svg)](https://github.com/Linli1221/Android-Webcam-Project/actions/workflows/checks.yml)
 ![GitHub Stars](https://img.shields.io/github/stars/soubhagyajit/Android-Webcam-Project?style=social)
 
 <br>
@@ -122,6 +124,7 @@ The system supports both USB and Wi-Fi connections, giving users flexibility bet
 - Manual and automatic focus controls.
 - Exposure control.
 - Zoom and camera lens switching.
+- **Background removal** — a green/blue screen keyer (Vulkan compute, with a CPU fallback), a person segmentation model when there is no screen at all, *or* a background plate shot of the empty room; background replaced with a colour or a photo before the frame is encoded.
 - USB and Wi-Fi connection modes.
 - Real-time connection status.
 - Optimized battery usage.
@@ -211,6 +214,170 @@ Available resolution options depend on your Android device's camera capabilities
 | 4K | 3840 × 2160 | Maximum supported quality |
 
 Change the resolution through the mobile application settings or the relevant configuration in the source code.
+
+### Background Removal
+
+Enabled from the phone's settings panel while the stream type is **MJPEG**. The work happens on the
+phone, on the raw NV21 frame, before JPEG encoding: no alpha channel is involved and the desktop
+client needs no change.
+
+**A green screen is optional.** Three engines share the compositor and the replacement background:
+
+| Mode | Engine | Wins when |
+|:---|:---|:---|
+| `chroma` | Chroma key - Vulkan or CPU | there is a real screen: the edge follows the colour boundary, so hair, motion blur and semi-transparent edges survive |
+| `person` | ML Kit selfie segmentation | there is no screen: a wall, a room, a busy office |
+| `plate` | Background plate subtraction | no screen but the phone is on a tripod: shoot the empty room once and the matte follows the real silhouette, hair included |
+| `auto` (default) | screen or person, whichever the frame calls for | the user should not have to know which one applies |
+
+`auto` decides from the *border* of the frame: a coloured screen fills the border, a room does not.
+It re-checks roughly every two seconds and needs two agreeing probes before switching, so a green
+object entering the shot cannot flip the stream back and forth.
+
+#### Chroma key controls
+
+| Control | What it does |
+|:---|:---|
+| Key colour | Green or blue screen; used as the starting point and fallback |
+| Similarity | How much colour difference still counts as screen |
+| Soft edge | Width of the alpha ramp, keeps hair and shoulders from looking cut out |
+| Spill removal | Removes the green cast the screen bounces onto the subject |
+| Background | Solid colour, or a photo picked with the system picker |
+
+The key colour is re-sampled from the border of the frame a few times per second, so unevenly lit
+screens still key out. The same settings are reachable over HTTP — see `/help` on the device.
+
+#### Person mask controls
+
+| Control | What it does |
+|:---|:---|
+| Cut | Foreground threshold of the model's confidence; moves the edge in or out |
+| Edge softness | Width of the alpha ramp around the cut |
+| Stabilise | Averages consecutive masks - less flicker, a little more lag |
+
+The model runs **asynchronously** and the mask trails the frame by one or two frames. Inference
+takes 25-65 ms, so waiting for it inside the capture loop would halve the frame rate; instead each
+frame is composited against the newest mask available, and frames that arrive while a request is
+still in flight are dropped rather than queued. Compositing stays on the CPU: the mask is 256×256
+and arrives at 15-30 Hz, so uploading it to the GPU every frame would cost more in synchronisation
+than the compositing itself.
+
+Limits worth knowing: segmentation finds **one person** - it does not key objects, pets or a second
+person - and the bundled model adds about 4.5 MB to the APK. It is bundled rather than delivered
+through Play Services precisely so it also works on phones without Google Play Services. Unlike the
+chroma path, it does not remove green spill, because there is no screen to bounce light.
+
+The segmenter's mask is in the *upright* frame while the sensor buffer is not, so on a phone held in
+portrait the two differ by 90 degrees. The frame is resampled into an upright 256×256 NV21 for
+inference, and the returned mask is rotated once into sensor orientation before compositing - which
+is what keeps the per-pixel step a plain axis-aligned upsample.
+
+`AWA/tools/chroma_reference.py` holds a Python mirror of the keyer, and
+`AWA/tools/mask_composite_check.py` checks the segmentation half: the rotations against numpy's own,
+and the composite against a ground-truth silhouette.
+
+```bash
+python AWA/tools/chroma_reference.py       # chroma keyer reference sheet
+python AWA/tools/mask_composite_check.py   # rotation + mask compositing
+```
+
+#### Background plate (no screen, no model)
+
+Press **Capture** in the plate section while the scene is empty, and step out of the frame. Three
+frames are averaged into the plate, which is then subtracted from every following frame - so the
+matte follows the real silhouette instead of a 256×256 model mask, and it does not care whether the
+wall behind you is white, cluttered or brick. It only cares that nothing moves.
+
+| Control | What it does |
+|:---|:---|
+| Sensitivity | Trades leftovers of the room against keeping clothes and hair that match the wall |
+| Edge softness | Width of the alpha ramp at the silhouette |
+| Stabilise | Averages consecutive mattes - less flicker, a little more lag |
+
+What it does per frame:
+
+| Stage | Why |
+|:---|:---|
+| Exposure estimate | The median luma shift over pixels whose chroma still matches the plate. Without it, the subject walking in makes the AE dim the room and the whole wall becomes foreground |
+| Two-axis difference | Score is the larger of the normalised luma and chroma distances - luma alone cannot separate a shadow from a dark sleeve, chroma alone is blind to a white shirt against a white wall |
+| Shadow rejection | A shadow scales the light, and chroma is measured against luma, so `(u-128)/y` and `(v-128)/y` do not move under one - that, plus a brightness ratio window, separates "wall in shade" from "dark trousers" |
+| Slow re-learning | Background pixels creep 1/32 towards the live frame, so a lamp switched on stops being a hole after a couple of seconds |
+
+Limits worth knowing: the camera must **stay put** (a bumped tripod means re-capture, and a change of
+resolution or lens drops the plate automatically), the plate lives in memory only, and an object at
+50-95% of the wall brightness *with the wall's exact hue* is indistinguishable from a shadow - below
+50% it is always kept, which is the safer half of that trade.
+
+Measured on a synthetic room (textured wall, ragged hair, white shirt, cast shadow, 512×288):
+IoU 0.997 against the true silhouette, 0.1% of the wall left behind, and the cast shadow reads as
+0.5% alpha instead of being blended into the replacement background. A one to four pixel wobble of
+the camera leaks under 1% of a *smooth* wall; a high-contrast background (bookshelf, brick) is a
+different story, because every edge of it moves - that is what the "keep the phone still" note is
+about.
+
+```bash
+python AWA/tools/plate_check.py   # exposure estimate, IoU, shadow rejection, flicker, composite
+```
+
+#### Vulkan compute backend (chroma key)
+
+The keyer runs on the GPU by default. `AWA/app/src/main/cpp` holds a small Vulkan 1.0 compute
+implementation; the Kotlin side ([`ChromaKey.kt`](AWA/app/src/main/java/com/soubhagyajit/awa/processing/ChromaKey.kt))
+picks the backend and keeps the CPU version as a transparent fallback.
+
+| | |
+|:---|:---|
+| Pass 1 (`chroma_key_y.spv`) | Four luma bytes per invocation; alpha comes from the 2×2 chroma cell |
+| Pass 2 (`chroma_key_uv.spv`) | Two chroma cells per invocation, plus the border sampling for the key colour |
+| Memory | Host visible + coherent, persistently mapped — the frame is copied straight in and out, no staging buffers |
+| Allocations | None per frame; the command buffer is recorded once per frame size |
+
+The two passes each write whole 32-bit words of the NV21 buffer, which is why the GPU path requires
+a width that is a multiple of 4 (all camera modes here are). Anything else, a device without Vulkan,
+a driver that rejects the shaders, or a failed dispatch drops back to the CPU keyer — the settings
+panel shows which one is live, and `chroma_key_gpu` in `/settings` selects it by hand.
+
+The SPIR-V blobs are committed under `AWA/app/src/main/assets/shaders`. After editing a `.comp`
+file, regenerate them (no Vulkan SDK needed, glslang is used as WASM):
+
+```bash
+cd AWA
+npm install --no-save @webgpu/glslang
+node tools/build_shaders.mjs
+```
+
+Building the app now requires the NDK and CMake, which Android Studio installs on demand.
+
+Two checks in `AWA/tools` keep the shaders honest without a phone at hand:
+
+```bash
+python AWA/tools/chroma_gpu_check.py   # emulates both shaders, compares with the CPU reference
+python AWA/tools/check_spirv.py        # SPIR-V 1.0, entry point, bindings 0..4 and their kinds
+```
+
+![Green screen demo](assets/chroma_key_demo.png)
+
+*Synthetic scene with uneven screen lighting and green spill. Top-left: original. Top-right: keyed
+onto a solid colour. Bottom-left: same with spill removal off. Bottom-right: keyed onto a photo.*
+
+![Person segmentation demo](assets/background_person_demo.png)
+
+*The same scene treated as an ordinary background (no screen assumed), with a deliberately soft and
+noisy stand-in for the model's mask. Top-left: sensor frame, unrotated. Top-right: ideal composite
+from the ground-truth silhouette. Bottom-left: the pipeline under test. Bottom-right: the difference
+between the two, amplified 4x - the error is the 1-2 pixel silhouette, nothing else. The green rim is
+in the source image, not added by the composite: the person path deliberately does not despill.*
+
+![Edge softness](assets/background_person_edges.png)
+
+*Edge softness 0.03, 0.12, 0.2 and 0.45 on the same crop. The 256×256 mask is upsampled bilinearly,
+so the ramp is smooth at every setting - no blocky steps from the mask's own resolution.*
+
+![Background plate demo](assets/background_plate_demo.png)
+
+*A room with no screen at all, keyed by plate subtraction: the poster, the table edge and the cast
+shadow on the right all belong to the plate and disappear, while the ragged hair silhouette survives
+at full resolution. The matte is one byte per pixel - nothing is downsampled to a model grid.*
 
 ---
 

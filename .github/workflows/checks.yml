@@ -1,0 +1,95 @@
+name: Algorithm checks
+
+# Everything under AWA/tools is a CPU mirror of what the phone does on the GPU, plus the SPIR-V
+# checker. These run in seconds and fail loudly when a constant is retuned in Kotlin but not in the
+# mirror - which is exactly the kind of drift that only shows up as a bad matte on a device.
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'AWA/tools/**'
+      - 'AWA/app/src/main/cpp/**'
+      - 'AWA/app/src/main/assets/shaders/**'
+      - '.github/workflows/checks.yml'
+  pull_request:
+    paths:
+      - 'AWA/tools/**'
+      - 'AWA/app/src/main/cpp/**'
+      - 'AWA/app/src/main/assets/shaders/**'
+      - '.github/workflows/checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mirrors:
+    name: CPU mirrors and SPIR-V
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install numpy + pillow
+        run: python -m pip install --upgrade pip numpy pillow
+
+      # Each of these exits non-zero on a real mismatch: the descriptor layout, the shader maths
+      # against the CPU keyer, the plate keyer against a ground-truth silhouette.
+      - name: Chroma key reference, shader emulation, SPIR-V layout
+        working-directory: AWA/tools
+        run: |
+          python check_spirv.py
+          python chroma_reference.py
+          python chroma_gpu_check.py
+
+      - name: Person segmentation (mask warp + compositing)
+        working-directory: AWA/tools
+        run: python mask_composite_check.py
+
+      - name: Background plate (exposure, matte, shadow, temporal)
+        working-directory: AWA/tools
+        run: python plate_check.py
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: check-images
+          path: AWA/tools/*.png
+          retention-days: 7
+          if-no-files-found: ignore
+
+  shaders:
+    name: SPIR-V matches its source
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Rebuild the shaders with glslang (WASM)
+        working-directory: AWA
+        run: |
+          npm install --no-save --no-audit --no-fund @webgpu/glslang
+          node tools/build_shaders.mjs
+
+      # Informational: a byte diff can come from a glslang version bump rather than from an edited
+      # .comp, so this reports instead of blocking. check_spirv.py above is the hard gate.
+      - name: Diff against the committed blobs
+        continue-on-error: true
+        run: |
+          git diff --stat -- AWA/app/src/main/assets/shaders
+          git diff --exit-code -- AWA/app/src/main/assets/shaders \
+            || echo "::warning::the committed SPIR-V differs from a fresh compile - re-run tools/build_shaders.mjs if the .comp files changed"
