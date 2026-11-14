@@ -87,7 +87,7 @@ fun HelpContent(modifier: Modifier = Modifier) {
                 path = "/features",
                 description = "Get available features. The sizes are read from the camera, smallest " +
                         "first; the last one is the sensor's own frame. Ask for it with " +
-                        "resolution_str=\"native\" (up to 12 MP in MJPEG, capped by the encoder in RTSP).",
+                        "resolution_str=\"native\" (up to 13 MP in MJPEG, capped by the encoder in RTSP).",
                 exampleJson = """
 {
     "resolutions": ["640x480","1280x720","1920x1080","3840x2160","4000x3000"],

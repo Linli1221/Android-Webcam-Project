@@ -69,10 +69,15 @@ private const val MAX_FRAME_WIDTH = 8192
 
 /**
  * Biggest frame carried through the MJPEG path. A frame is 1.5 bytes per pixel as NV21 and the
- * pipeline holds two or three copies plus the JPEG buffer while encoding, so 12 MP is about 60 MB
- * of peak allocation - the point where a mid-range phone starts to thrash, not a hard limit.
+ * pipeline holds two or three copies plus the JPEG buffer while encoding, so ~12 MP frames are
+ * about 60 MB of peak allocation - the point where a mid-range phone starts to thrash, not a hard
+ * limit.
+ *
+ * 13 MP rather than 12: the usual "12 MP" sensor modes are not exactly 12 million pixels. A
+ * 4000x3000 mode is 12.00 MP, but a 16:9 4624x2600 mode - what the test device actually reports -
+ * is 12.02 MP, and a cap of exactly 12 000 000 would reject it by 22 400 pixels.
  */
-private const val NATIVE_MAX_PIXELS = 12_000_000
+private const val NATIVE_MAX_PIXELS = 13_000_000
 
 class CameraViewModel : ViewModel() {
 
@@ -429,7 +434,7 @@ class CameraViewModel : ViewModel() {
      * Preview and video-recording sizes are always included, so sizes that are only offered for
      * video (for example 1080p on older phones) still show up.
      *
-     * In MJPEG mode the list goes up to the sensor's own largest size (12 MP at most, see
+     * In MJPEG mode the list goes up to the sensor's own largest size (13 MP at most, see
      * [NATIVE_MAX_PIXELS]) rather than stopping at the camcorder profile - that cap belongs to the
      * hardware video encoder, and the MJPEG path never touches it. In RTSP mode the cap stays,
      * because there the encoder really does decide what it will take.

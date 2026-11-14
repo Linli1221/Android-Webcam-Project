@@ -222,7 +222,7 @@ more - that cap belongs to the hardware video encoder, and the MJPEG path never 
 sensor's own frame is offered as the last entry, marked `· sensor` and reachable over HTTP as
 `resolution_str=native`. Three things are worth knowing:
 
-- It stops at **12 MP**. A frame costs 1.5 bytes per pixel as NV21 and the pipeline holds two or
+- It stops at **13 MP** (the usual 12 MP sensor modes are not exactly 12 000 000 pixels). A frame costs 1.5 bytes per pixel as NV21 and the pipeline holds two or
   three copies plus the JPEG buffer, so 12 MP is already ~60 MB of peak allocation.
 - Every extra pixel is JPEG-encoded and (if background removal is on) masked on the CPU, so the frame
   rate drops roughly in proportion. Measured on a Redmi Note 12 Turbo with the Vulkan keyer on:
