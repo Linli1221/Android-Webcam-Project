@@ -220,17 +220,23 @@ Change the resolution through the mobile application settings or the relevant co
 **Native (sensor) resolution.** In MJPEG mode the list is not capped at the camcorder profile any
 more - that cap belongs to the hardware video encoder, and the MJPEG path never uses it - so the
 sensor's own frame is offered as the last entry, marked `· sensor` and reachable over HTTP as
-`resolution_str=native`. Three things are worth knowing:
+`resolution_str=native`. Four things are worth knowing:
 
-- It stops at **13 MP** (the usual 12 MP sensor modes are not exactly 12 000 000 pixels). A frame costs 1.5 bytes per pixel as NV21 and the pipeline holds two or
-  three copies plus the JPEG buffer, so 12 MP is already ~60 MB of peak allocation.
+- It stops at **13 MP**. The usual "12 MP" sensor modes are not exactly 12 000 000 pixels: the test
+  phone reports 4624 × 2600, which is 12 022 400, and a cap of exactly 12 MP rejected the one size
+  the feature exists for. A frame costs 1.5 bytes per pixel as NV21 and the pipeline holds two or
+  three copies plus the JPEG buffer, so ~12 MP is already ~60 MB of peak allocation.
 - Every extra pixel is JPEG-encoded and (if background removal is on) masked on the CPU, so the frame
-  rate drops roughly in proportion. Measured on a Redmi Note 12 Turbo with the Vulkan keyer on:
-  **3.7 fps at 3840 × 2160**, 9 fps at 2304 × 1728. 1080p is the practical ceiling for 30 fps.
+  rate drops roughly in proportion. Measured on a Redmi Note 12 Turbo (Adreno 725): **3.7 fps at
+  3840 × 2160** with the Vulkan keyer, **9 fps at 2304 × 1728**, and a 4624 × 2600 native frame is
+  ~190 KB of JPEG. 1080p is the practical ceiling for 30 fps.
 - If the camera refuses to run that size next to a preview, the app logs it, drops to the largest
   size below it and shows `Camera delivers …` under the dropdown, rather than leaving a black screen.
   `GET /settings` reports both halves: `resolution_str` is what is arriving, `resolution_requested`
   is what was asked for.
+- A running RTSP stream refuses resolution changes altogether (`Cannot change resolution while RTSP
+  stream is active`), and RTSP has no native entry because the hardware encoder caps it there. Switch
+  to MJPEG first.
 
 In RTSP mode the cap stays, because there the hardware encoder really does decide what it can take.
 
