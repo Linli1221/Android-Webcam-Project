@@ -629,9 +629,16 @@ void Keyer::shutdown() {
         vkDestroyInstance(instance_, nullptr);
         instance_ = VK_NULL_HANDLE;
     }
-    pipelineY_ = pipelineUV_ = VK_NULL_HANDLE;
-    descriptorPool_ = pipelineLayout_ = setLayout_ = VK_NULL_HANDLE;
-    commandPool_ = fence_ = VK_NULL_HANDLE;
+    // One handle per statement: VK_NULL_HANDLE is nullptr in C++, so a chained assignment like
+    // `a = b = VK_NULL_HANDLE` has the type of b on the right and does not compile when the two
+    // handles are different types.
+    pipelineY_ = VK_NULL_HANDLE;
+    pipelineUV_ = VK_NULL_HANDLE;
+    descriptorPool_ = VK_NULL_HANDLE;
+    pipelineLayout_ = VK_NULL_HANDLE;
+    setLayout_ = VK_NULL_HANDLE;
+    commandPool_ = VK_NULL_HANDLE;
+    fence_ = VK_NULL_HANDLE;
     commandBuffer_ = VK_NULL_HANDLE;
     descriptorSet_ = VK_NULL_HANDLE;
 }

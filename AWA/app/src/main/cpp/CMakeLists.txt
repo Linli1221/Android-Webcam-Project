@@ -7,7 +7,10 @@ project(awa_chromakey LANGUAGES CXX)
 add_library(awa_chromakey SHARED chroma_vulkan.cpp)
 
 target_compile_features(awa_chromakey PRIVATE cxx_std_17)
-target_compile_options(awa_chromakey PRIVATE -Wall -Wextra -Wno-unused-parameter)
+# Vulkan's create-info structs are filled with designated initialisers that leave pNext out (it is
+# optional and null for every one of them here), which -Wextra is noisy about.
+target_compile_options(awa_chromakey PRIVATE -Wall -Wextra -Wno-unused-parameter
+                                             -Wno-missing-field-initializers)
 
 find_library(log-lib log)
 
