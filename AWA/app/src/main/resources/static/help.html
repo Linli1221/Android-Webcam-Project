@@ -75,10 +75,17 @@
     "zoom": 1.0,
     "stream_quality": 80,
     "flip": false,
-    "resolution_str": "1280x720"
+    "resolution_str": "2304x1728",
+    "resolution_requested": "3840x2160",
     "camera": "back",
 }</code>
     </pre>
+    <p>
+        <code>resolution_str</code> is what the camera is really delivering;
+        <code>resolution_requested</code> is what was asked for. They differ when the camera refuses
+        a size - a sensor size that cannot run next to a preview, for instance - and CameraX picks
+        the closest one it will accept.
+    </p>
 </div>
 <div class="card">
     <h3><span class="method get">Get</span> <code>/control</code></h3>

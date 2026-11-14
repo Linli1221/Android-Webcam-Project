@@ -104,7 +104,9 @@ fun HelpContent(modifier: Modifier = Modifier) {
             ApiEndpointCard(
                 method = "GET",
                 path = "/settings",
-                description = "Get current settings.",
+                description = "Get current settings. resolution_str is what the camera really " +
+                        "delivers, resolution_requested is what was asked for; they differ when the " +
+                        "camera refuses a size and CameraX picks the closest one it will accept.",
                 exampleJson = """
 {
     "focus_mode": 0,
@@ -113,7 +115,8 @@ fun HelpContent(modifier: Modifier = Modifier) {
     "zoom": 1.0,
     "stream_quality": 80,
     "flip": false,
-    "resolution_str": "1280x720",
+    "resolution_str": "2304x1728",
+    "resolution_requested": "3840x2160",
     "camera": "back"
 }
                 """.trimIndent()

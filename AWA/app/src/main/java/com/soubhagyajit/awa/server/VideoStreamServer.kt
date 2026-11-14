@@ -39,7 +39,14 @@ object VideoStreamServer {
     @Serializable
     data class SettingsResponse(
         val camera: String,
+        /** The size the camera is really delivering; falls back to the requested one before the first frame. */
         val resolution_str: String,
+        /**
+         * The size that was asked for. When it differs from [resolution_str] the camera refused it
+         * and CameraX picked the closest size it would accept - which is what happens to a sensor
+         * size that cannot run next to a preview.
+         */
+        val resolution_requested: String? = null,
         val zoom: Float,
         val focus_mode: Int,
         val focus_distance: Float,

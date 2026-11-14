@@ -579,6 +579,7 @@ class CameraViewModel : ViewModel() {
                 camera = if (s.lensFacing == CameraSelector.LENS_FACING_BACK) "back" else "front",
                 // Report the size of the frames really being delivered, so the PC client sizes its camera correctly
                 resolution_str = (s.activeSize ?: s.resolution.size).let { "${it.width}x${it.height}" },
+                resolution_requested = s.resolution.key,
                 zoom = s.zoom,
                 flash = s.isFlashEnabled,
                 exposure_index = s.exposureIndex,

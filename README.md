@@ -225,9 +225,12 @@ sensor's own frame is offered as the last entry, marked `· sensor` and reachabl
 - It stops at **12 MP**. A frame costs 1.5 bytes per pixel as NV21 and the pipeline holds two or
   three copies plus the JPEG buffer, so 12 MP is already ~60 MB of peak allocation.
 - Every extra pixel is JPEG-encoded and (if background removal is on) masked on the CPU, so the frame
-  rate drops roughly in proportion. 1080p is the practical ceiling for 30 fps.
+  rate drops roughly in proportion. Measured on a Redmi Note 12 Turbo with the Vulkan keyer on:
+  **3.7 fps at 3840 × 2160**, 9 fps at 2304 × 1728. 1080p is the practical ceiling for 30 fps.
 - If the camera refuses to run that size next to a preview, the app logs it, drops to the largest
   size below it and shows `Camera delivers …` under the dropdown, rather than leaving a black screen.
+  `GET /settings` reports both halves: `resolution_str` is what is arriving, `resolution_requested`
+  is what was asked for.
 
 In RTSP mode the cap stays, because there the hardware encoder really does decide what it can take.
 
